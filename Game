@@ -1,0 +1,614 @@
+import pygame
+import sys
+import random
+import os
+
+# --- 1. Game Constants and Initialization ---
+pygame.init()
+
+# Screen dimensions
+SCREEN_WIDTH = 800
+SCREEN_HEIGHT = 600
+SCREEN = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+pygame.display.set_caption("Infinite Runner: Temple Surfer Hybrid")
+
+# Colors
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+GREEN = (0, 150, 0)   
+RED = (200, 0, 0)     
+YELLOW = (255, 200, 0) 
+BROWN = (139, 69, 19) 
+GRAY = (200, 200, 200) 
+PURPLE = (150, 0, 150) # DIAMOND color
+CYAN = (0, 255, 255)  # Hoverboard color
+BLUE = (0, 0, 255)
+
+# Game control
+clock = pygame.time.Clock()
+GAME_SPEED = 5 
+running = True
+
+# --- Game States (NEW) ---
+GAME_STATE = 'HOME'
+# Possible states: 'HOME', 'RUNNING', 'PAUSED', 'SHOP', 'ABILITIES', 'DEATH', 'INFO'
+
+# --- Game State Variables ---
+score = 0
+high_score = 0 # NEW: High Score variable
+diamonds = 0 
+game_over = False
+
+# --- Upgrades & Skins Variables ---
+coin_spawn_rate_multiplier = 1.0 
+coin_spawn_upgrade_level = 0
+MAX_COIN_UPGRADE_LEVEL = 7
+HOVERBOARD_DURATION = 5 * 60 # 5 seconds at 60 FPS
+hoverboard_active = False 
+hoverboard_timer = 0
+
+# Lane configuration
+LANE_WIDTH = 100
+LANE_X_POSITIONS = [
+    SCREEN_WIDTH // 2 - LANE_WIDTH, 
+    SCREEN_WIDTH // 2,               
+    SCREEN_WIDTH // 2 + LANE_WIDTH   
+]
+FONT_SMALL = pygame.font.Font(None, 24)
+FONT_MEDIUM = pygame.font.Font(None, 36)
+FONT_LARGE = pygame.font.Font(None, 48) # Increased font size for titles
+
+# --- 2. Skin Definitions ---
+SKIN_COLORS = {
+    "LUCUS": (0, 0, 255),       # Blue (Default)
+    "ELEVEN": (255, 105, 180),  # Pink
+    "STEEV": (0, 150, 255),     # Light Blue
+    "AD_SPIDER": (150, 0, 0),   # Dark Red (Premium)
+    "MINECRAFT": (0, 100, 0)    # Dark Green (Most Valuable/Premium)
+}
+
+SKIN_PRICES = {
+    "LUCUS": 0, "ELEVEN": 50, "STEEV": 75,
+    "AD_SPIDER": 200, "MINECRAFT": 500
+}
+current_skin = "LUCUS"
+
+# --- Shop Definitions ---
+UPGRADE_COSTS = [4500, 9000, 4500, 9000, 4500, 9000, 4500] 
+UPGRADE_MULTIPLIERS = [1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7]
+
+# --- High Score File Management ---
+def load_high_score():
+    """Loads the high score from a file if it exists."""
+    if os.path.exists("highscore.txt"):
+        with open("highscore.txt", "r") as file:
+            try:
+                return int(file.read())
+            except ValueError:
+                return 0
+    return 0
+
+def save_high_score(score_value):
+    """Saves the high score to a file."""
+    with open("highscore.txt", "w") as file:
+        file.write(str(score_value))
+
+high_score = load_high_score()
+
+# --- 3. Functions for Game State Management ---
+def set_state(state):
+    """Sets the global game state."""
+    global GAME_STATE
+    GAME_STATE = state
+
+def start_game():
+    """Initializes the game variables and sets state to RUNNING."""
+    global score, game_over, hoverboard_active, hoverboard_timer, high_score
+    
+    # Check and save high score from the previous run
+    if score // 10 > high_score:
+        high_score = score // 10
+        save_high_score(high_score)
+        
+    # Reset running session variables
+    score = 0
+    game_over = False
+    hoverboard_active = False
+    hoverboard_timer = 0
+    
+    # Re-initialize player and clear groups
+    all_sprites.empty()
+    obstacles.empty()
+    coins.empty()
+    diamonds_group.empty()
+    hoverboards.empty()
+    
+    global player
+    player = Player()
+    all_sprites.add(player)
+    
+    # Reset timers
+    pygame.time.set_timer(OBSTACLE_TIMER, random.randint(1500, 3000))
+    set_coin_timer_with_rate()
+    pygame.time.set_timer(DIAMOND_TIMER, random.randint(20000, 40000))
+    pygame.time.set_timer(HOVERBOARD_TIMER, random.randint(15000, 30000))
+    
+    set_state('RUNNING')
+
+def toggle_pause():
+    """Toggles between RUNNING and PAUSED states."""
+    if GAME_STATE == 'RUNNING':
+        set_state('PAUSED')
+    elif GAME_STATE == 'PAUSED':
+        set_state('RUNNING')
+
+# --- 4. Shop/Ability Actions (Moved to main scope for button access) ---
+def buy_coin_upgrade():
+    """Handles the purchase of the coin spawn rate upgrade."""
+    global score, coin_spawn_upgrade_level, coin_spawn_rate_multiplier
+    if coin_spawn_upgrade_level < MAX_COIN_UPGRADE_LEVEL:
+        cost = UPGRADE_COSTS[coin_spawn_upgrade_level]
+        internal_cost = cost * 10
+        if score >= internal_cost:
+            score -= internal_cost
+            coin_spawn_upgrade_level += 1
+            coin_spawn_rate_multiplier = UPGRADE_MULTIPLIERS[coin_spawn_upgrade_level - 1]
+            set_coin_timer_with_rate()
+        else:
+            print("Not enough coins!")
+    else:
+        print("Max upgrade level reached!")
+
+def buy_skin(skin_name):
+    """Handles the purchase and equipping of a character skin."""
+    global current_skin, diamonds, score
+    price = SKIN_PRICES[skin_name]
+    
+    if skin_name == current_skin: return
+
+    if skin_name in ["AD_SPIDER", "MINECRAFT"]:
+        currency_amount = diamonds
+        is_diamond_purchase = True
+    else:
+        currency_amount = score // 10 
+        is_diamond_purchase = False
+
+    if price == 0 or currency_amount >= price:
+        if price > 0:
+            if is_diamond_purchase:
+                diamonds -= price
+            else:
+                score -= price * 10 
+
+        current_skin = skin_name
+        # Update player's color immediately if player exists
+        if 'player' in globals():
+             player.image.fill(SKIN_COLORS[current_skin])
+    else:
+        print(f"Not enough {'Diamonds' if is_diamond_purchase else 'Coins'}!")
+
+def set_coin_timer_with_rate():
+    """Sets the COIN_TIMER based on the current spawn rate multiplier."""
+    min_ms = 5000 / coin_spawn_rate_multiplier
+    max_ms = 10000 / coin_spawn_rate_multiplier
+    pygame.time.set_timer(COIN_TIMER, 0) 
+    pygame.time.set_timer(COIN_TIMER, int(random.uniform(min_ms, max_ms)))
+
+# --- 5. Reusable Button Class ---
+class Button():
+    def __init__(self, x, y, width, height, text, color, action=None, font_size=24):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.color = color
+        self.text = text
+        self.action = action
+        self.font = pygame.font.Font(None, font_size)
+
+    def draw(self, surface):
+        pygame.draw.rect(surface, self.color, self.rect, border_radius=5)
+        text_surface = self.font.render(self.text, True, BLACK)
+        text_rect = text_surface.get_rect(center=self.rect.center)
+        surface.blit(text_surface, text_rect)
+
+    def check_click(self, event):
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if self.rect.collidepoint(event.pos):
+                if self.action:
+                    self.action()
+                return True
+        return False
+        
+# --- 6. Player, Obstacle, Collectible Classes (Shortened) ---
+
+# All sprite classes (Player, Obstacle, Coin, Diamond, Hoverboard) remain conceptually the same
+# as the previous combined version, relying on global skin and state variables.
+
+class Player(pygame.sprite.Sprite):
+    def __init__(self):
+        super().__init__()
+        self.image = pygame.Surface([40, 40])
+        self.image.fill(SKIN_COLORS[current_skin]) 
+        self.rect = self.image.get_rect()
+        self.current_lane_index = 1
+        self.rect.centerx = LANE_X_POSITIONS[self.current_lane_index]
+        self.ground_y = SCREEN_HEIGHT - 90 
+        self.rect.y = self.ground_y 
+        self.vertical_speed = 0
+        self.is_jumping = False
+        self.gravity = 1
+        self.JUMP_STRENGTH = -20
+
+    def update(self):
+        if hoverboard_active:
+            self.image.fill(CYAN)
+            self.rect.height = 20 
+            self.rect.y = self.ground_y + 20 
+        else:
+            self.image.fill(SKIN_COLORS[current_skin])
+            self.rect.height = 40 
+            if self.is_jumping or self.rect.y < self.ground_y:
+                self.vertical_speed += self.gravity
+            self.rect.y += self.vertical_speed
+            if self.rect.y >= self.ground_y:
+                self.rect.y = self.ground_y
+                self.is_jumping = False
+                self.vertical_speed = 0
+
+    def jump(self):
+        if not self.is_jumping and not hoverboard_active:
+            self.is_jumping = True
+            self.vertical_speed = self.JUMP_STRENGTH
+
+    def move_lane(self, direction):
+        new_index = self.current_lane_index + direction
+        if 0 <= new_index < len(LANE_X_POSITIONS):
+            self.current_lane_index = new_index
+            self.rect.centerx = LANE_X_POSITIONS[self.current_lane_index]
+
+# Obstacle, Coin, Diamond, Hoverboard classes are the same as before...
+class Obstacle(pygame.sprite.Sprite):
+    def __init__(self, lane_index):
+        super().__init__(); obstacle_type = random.choice(['Barricade', 'Box'])
+        if obstacle_type == 'Barricade': self.width, self.height, self.color = 80, 30, RED
+        else: self.width, self.height, self.color = 40, 70, BROWN
+        self.image = pygame.Surface([self.width, self.height]); self.image.fill(self.color); self.rect = self.image.get_rect(); self.rect.centerx = LANE_X_POSITIONS[lane_index]; self.rect.right = SCREEN_WIDTH + 50; self.rect.bottom = player.ground_y + 40 
+    def update(self):
+        self.rect.x -= GAME_SPEED; 
+        if self.rect.right < 0: self.kill()
+
+class Coin(pygame.sprite.Sprite):
+    def __init__(self, lane_index):
+        super().__init__(); self.size = 20; self.image = pygame.Surface([self.size, self.size]); self.image.fill(YELLOW); self.rect = self.image.get_rect(); self.rect.centerx = LANE_X_POSITIONS[lane_index]; self.rect.right = SCREEN_WIDTH + 50; self.rect.bottom = player.ground_y + 10 
+    def update(self):
+        self.rect.x -= GAME_SPEED; 
+        if self.rect.right < 0: self.kill()
+
+class Diamond(pygame.sprite.Sprite):
+    def __init__(self, lane_index):
+        super().__init__(); self.size = 15; self.image = pygame.Surface([self.size, self.size]); self.image.fill(PURPLE); self.rect = self.image.get_rect(); self.rect.centerx = LANE_X_POSITIONS[lane_index]; self.rect.right = SCREEN_WIDTH + 50; self.rect.bottom = player.ground_y - 20 
+    def update(self):
+        self.rect.x -= GAME_SPEED; 
+        if self.rect.right < 0: self.kill()
+
+class Hoverboard(pygame.sprite.Sprite):
+    def __init__(self, lane_index):
+        super().__init__(); self.width = 60; self.height = 15; self.image = pygame.Surface([self.width, self.height]); self.image.fill(CYAN); self.rect = self.image.get_rect(); self.rect.centerx = LANE_X_POSITIONS[lane_index]; self.rect.right = SCREEN_WIDTH + 50; self.rect.bottom = player.ground_y + 10 
+    def update(self):
+        self.rect.x -= GAME_SPEED; 
+        if self.rect.right < 0: self.kill()
+
+
+# --- 7. Sprite Groups and Initial Setup ---
+all_sprites = pygame.sprite.Group()
+obstacles = pygame.sprite.Group()
+coins = pygame.sprite.Group()
+diamonds_group = pygame.sprite.Group() 
+hoverboards = pygame.sprite.Group() 
+
+# Initialize player, even if we start on the home screen, to define player.ground_y
+player = Player() 
+
+# --- 8. Event Timers ---
+OBSTACLE_TIMER = pygame.USEREVENT + 1
+COIN_TIMER = pygame.USEREVENT + 2
+DIAMOND_TIMER = pygame.USEREVENT + 3 
+HOVERBOARD_TIMER = pygame.USEREVENT + 4 
+
+# Disable timers initially, they are enabled when the state is set to RUNNING
+pygame.time.set_timer(OBSTACLE_TIMER, 0)
+pygame.time.set_timer(COIN_TIMER, 0)
+pygame.time.set_timer(DIAMOND_TIMER, 0)
+pygame.time.set_timer(HOVERBOARD_TIMER, 0)
+
+# --- 9. Drawing Functions for Screens ---
+def draw_text(text, font, color, x, y):
+    text_surface = font.render(text, True, color)
+    text_rect = text_surface.get_rect(center=(x, y))
+    SCREEN.blit(text_surface, text_rect)
+
+def draw_shop_menu():
+    """Draws the shop menu for purchasing skins."""
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA); overlay.fill((0, 0, 0, 150)); SCREEN.blit(overlay, (0, 0))
+    box_rect = pygame.Rect(SCREEN_WIDTH // 2 - 300, SCREEN_HEIGHT // 2 - 250, 600, 500); pygame.draw.rect(SCREEN, BLACK, box_rect); pygame.draw.rect(SCREEN, WHITE, box_rect, 3) 
+    draw_text("SKIN SHOP", FONT_LARGE, WHITE, box_rect.centerx, box_rect.y + 30)
+    draw_text("Skins are purchased with DIAMONDS (D) or COINS (C)", FONT_SMALL, PURPLE, box_rect.centerx, box_rect.y + 70)
+
+    x_start = box_rect.centerx - 250; y_start = box_rect.y + 100
+    shop_buttons = []
+    
+    for i, (name, color) in enumerate(SKIN_COLORS.items()):
+        price = SKIN_PRICES[name];
+        if name == current_skin: btn_text = "EQUIPPED"; btn_action = None; btn_color = GREEN
+        elif price == 0: btn_text = "FREE"; btn_action = lambda n=name: buy_skin(n); btn_color = GRAY
+        elif name in ["AD_SPIDER", "MINECRAFT"]: btn_text = f"{price} D"; btn_action = lambda n=name: buy_skin(n); btn_color = PURPLE
+        else: btn_text = f"{price} C"; btn_action = lambda n=name: buy_skin(n); btn_color = YELLOW
+
+        skin_button = Button(x_start + (i % 3) * 200, y_start + (i // 3) * 120, 150, 50, f"{name} ({btn_text})", btn_color, btn_action, 18)
+        skin_button.draw(SCREEN); shop_buttons.append(skin_button)
+        draw_text(f"{name}", FONT_SMALL, WHITE, x_start + (i % 3) * 200 + 75, y_start + (i // 3) * 120 + 20)
+        draw_text(f"({btn_text})", FONT_SMALL, BLACK, x_start + (i % 3) * 200 + 75, y_start + (i // 3) * 120 + 35)
+
+
+    close_button = Button(box_rect.centerx - 50, box_rect.y + 450, 100, 30, "Close", RED, lambda: set_state('HOME'))
+    close_button.draw(SCREEN); shop_buttons.append(close_button)
+    
+    return shop_buttons
+
+def draw_abilities_menu():
+    """Draws the abilities menu for upgrades (Coin Spawn Rate)."""
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA); overlay.fill((0, 0, 0, 150)); SCREEN.blit(overlay, (0, 0))
+    box_rect = pygame.Rect(SCREEN_WIDTH // 2 - 250, SCREEN_HEIGHT // 2 - 200, 500, 400); pygame.draw.rect(SCREEN, BLACK, box_rect); pygame.draw.rect(SCREEN, WHITE, box_rect, 3) 
+    draw_text("ABILITIES UPGRADE", FONT_LARGE, WHITE, box_rect.centerx, box_rect.y + 30)
+    
+    # --- Coin Spawn Rate Upgrade ---
+    draw_text("COIN SPAWN RATE (COINS)", FONT_MEDIUM, YELLOW, box_rect.centerx, box_rect.y + 100)
+    
+    level = coin_spawn_upgrade_level
+    if level < MAX_COIN_UPGRADE_LEVEL:
+        cost = UPGRADE_COSTS[level]
+        text = f"UPGRADE (Lvl {level+1}/{MAX_COIN_UPGRADE_LEVEL}): {cost} C"
+        buy_upgrade_button = Button(box_rect.centerx - 150, box_rect.y + 150, 300, 50, text, GRAY, buy_coin_upgrade, 20)
+    else:
+        text = f"MAX LEVEL REACHED"
+        buy_upgrade_button = Button(box_rect.centerx - 150, box_rect.y + 150, 300, 50, text, RED, None, 20)
+    buy_upgrade_button.draw(SCREEN)
+
+    draw_text(f"Current Multiplier: x{coin_spawn_rate_multiplier:.1f}", FONT_SMALL, WHITE, box_rect.centerx, box_rect.y + 220)
+
+    close_button = Button(box_rect.centerx - 50, box_rect.y + 340, 100, 30, "Close", RED, lambda: set_state('HOME'))
+    close_button.draw(SCREEN)
+    
+    return [buy_upgrade_button, close_button]
+
+def draw_death_screen():
+    """Draws the game over/death screen with High Score."""
+    
+    # Check for new high score
+    is_new_high_score = score // 10 > high_score
+    if is_new_high_score:
+        global high_score
+        high_score = score // 10
+        save_high_score(high_score)
+    
+    # Futuristic Theme Detail
+    SCREEN.fill(BLACK)
+    draw_text("SYSTEM FAILURE", FONT_LARGE, RED, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 150)
+    draw_text("SCANNING FOR DATA INTEGRITY...", FONT_MEDIUM, CYAN, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 100)
+    
+    draw_text(f"SCORE: {score // 10}", FONT_LARGE, YELLOW, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+    draw_text(f"HIGH SCORE: {high_score}", FONT_MEDIUM, WHITE, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 50)
+    
+    if is_new_high_score:
+         draw_text("NEW RECORD ACHIEVED!", FONT_MEDIUM, GREEN, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 100)
+
+    # Buttons for Death Screen
+    restart_btn = Button(SCREEN_WIDTH // 2 - 150, SCREEN_HEIGHT - 100, 120, 40, "RESTART", GRAY, start_game, 24)
+    home_btn = Button(SCREEN_WIDTH // 2 + 30, SCREEN_HEIGHT - 100, 120, 40, "HOME", GRAY, lambda: set_state('HOME'), 24)
+    
+    restart_btn.draw(SCREEN)
+    home_btn.draw(SCREEN)
+    
+    return [restart_btn, home_btn]
+
+def draw_home_screen():
+    """Draws the main title screen."""
+    SCREEN.fill(BLACK)
+
+    # Futuristic Intro Detail
+    intro_lines = [
+        ("INITIALIZING RUNNER PROTOCOL 7.1...", CYAN),
+        (f"DEVELOPERS: ADNAN RAZA ANSARI & AFAN", WHITE),
+        ("OBJECTIVE: MAXIMIZE DATA HARVEST (SCORE)", YELLOW)
+    ]
+    
+    y_offset = 100
+    for line, color in intro_lines:
+        draw_text(line, FONT_MEDIUM, color, SCREEN_WIDTH // 2, y_offset)
+        y_offset += 40
+
+    draw_text("TEMPLE SURFER HYBRID", FONT_LARGE, WHITE, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 50)
+    draw_text(f"BEST SCORE: {high_score}", FONT_MEDIUM, YELLOW, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+
+    # Buttons for Home Screen
+    play_btn = Button(SCREEN_WIDTH // 2 - 75, SCREEN_HEIGHT - 150, 150, 60, "PLAY", GREEN, start_game, 36)
+    shop_btn = Button(SCREEN_WIDTH // 2 - 250, SCREEN_HEIGHT - 100, 150, 40, "SHOP (SKINS)", GRAY, lambda: set_state('SHOP'), 24)
+    abilities_btn = Button(SCREEN_WIDTH // 2 + 100, SCREEN_HEIGHT - 100, 150, 40, "ABILITIES", GRAY, lambda: set_state('ABILITIES'), 24)
+    info_btn = Button(SCREEN_WIDTH // 2 - 75, SCREEN_HEIGHT - 50, 150, 30, "DEV INFO", GRAY, lambda: set_state('INFO'), 20)
+
+    play_btn.draw(SCREEN)
+    shop_btn.draw(SCREEN)
+    abilities_btn.draw(SCREEN)
+    info_btn.draw(SCREEN)
+    
+    # Display current currencies
+    draw_text(f"Coins: {score // 10}", FONT_SMALL, YELLOW, 100, 30)
+    draw_text(f"Diamonds: {diamonds}", FONT_SMALL, PURPLE, 100, 60)
+    
+    return [play_btn, shop_btn, abilities_btn, info_btn]
+
+def draw_info_box():
+    """Draws the developer information box."""
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA); overlay.fill((0, 0, 0, 150)); SCREEN.blit(overlay, (0, 0))
+    box_rect = pygame.Rect(SCREEN_WIDTH // 4, SCREEN_HEIGHT // 4, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2); pygame.draw.rect(SCREEN, BLACK, box_rect); pygame.draw.rect(SCREEN, WHITE, box_rect, 3) 
+    
+    DEV_INFO_TEXT = [
+        "--- RUNNER DATA LOG ---",
+        "Hi, My name is ADNAN RAZA ANSARI",
+        "My brother name is AFAN",
+        "We are the developers of this prototype.",
+        "-------------------------"
+    ]
+    y_offset = box_rect.y + 40
+    for line in DEV_INFO_TEXT:
+        color = CYAN if "ADNAN" in line or "AFAN" in line else WHITE
+        draw_text(line, FONT_SMALL, color, box_rect.centerx, y_offset)
+        y_offset += 30
+        
+    close_button = Button(box_rect.centerx - 50, box_rect.y + 340, 100, 30, "Close", RED, lambda: set_state('HOME'))
+    close_button.draw(SCREEN)
+    return [close_button]
+
+# --- 10. Main Game Loop ---
+
+# UI buttons used during RUNNING and PAUSED states
+pause_button = Button(SCREEN_WIDTH - 80, 20, 60, 30, "||", GRAY, toggle_pause, 24)
+
+while running:
+    # Event Handling
+    clicked_buttons = []
+    
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+        if GAME_STATE == 'HOME':
+            clicked_buttons.extend(draw_home_screen())
+        elif GAME_STATE == 'DEATH':
+            clicked_buttons.extend(draw_death_screen())
+        elif GAME_STATE == 'SHOP':
+            clicked_buttons.extend(draw_shop_menu())
+        elif GAME_STATE == 'ABILITIES':
+            clicked_buttons.extend(draw_abilities_menu())
+        elif GAME_STATE == 'INFO':
+            clicked_buttons.extend(draw_info_box())
+        elif GAME_STATE == 'RUNNING' or GAME_STATE == 'PAUSED':
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    toggle_pause()
+            
+            # Handle RUNNING/PAUSED buttons
+            clicked_buttons.append(pause_button)
+            
+            if GAME_STATE == 'PAUSED':
+                                pause_buttons = draw_pause_menu()
+                clicked_buttons.extend(pause_buttons)
+
+        # Check all relevant buttons for clicks
+        for btn in clicked_buttons:
+            btn.check_click(event)
+
+        # Player Controls (Only available when RUNNING)
+        if GAME_STATE == 'RUNNING' and event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_SPACE or event.key == pygame.K_UP:
+                player.jump()
+            elif event.key == pygame.K_LEFT:
+                player.move_lane(-1)
+            elif event.key == pygame.K_RIGHT:
+                player.move_lane(1)
+
+        # Spawning events (Only trigger when RUNNING)
+        if GAME_STATE == 'RUNNING':
+            if event.type == OBSTACLE_TIMER:
+                random_lane_index = random.choice([0, 1, 2])
+                new_obstacle = Obstacle(random_lane_index)
+                all_sprites.add(new_obstacle); obstacles.add(new_obstacle)
+
+            if event.type == COIN_TIMER:
+                if not any(c.rect.left < SCREEN_WIDTH // 2 for c in coins):
+                    random_lane_index = random.choice([0, 1, 2])
+                    new_coin = Coin(random_lane_index)
+                    all_sprites.add(new_coin); coins.add(new_coin)
+                set_coin_timer_with_rate() 
+
+            if event.type == DIAMOND_TIMER:
+                if not any(d.rect.left < SCREEN_WIDTH // 2 for d in diamonds_group):
+                    random_lane_index = random.choice([0, 1, 2])
+                    new_diamond = Diamond(random_lane_index)
+                    all_sprites.add(new_diamond); diamonds_group.add(new_diamond)
+
+            if event.type == HOVERBOARD_TIMER:
+                 if not any(h.rect.left < SCREEN_WIDTH // 2 for h in hoverboards):
+                    random_lane_index = random.choice([0, 1, 2])
+                    new_hoverboard = Hoverboard(random_lane_index)
+                    all_sprites.add(new_hoverboard); hoverboards.add(new_hoverboard)
+
+
+    # --- Game Logic Update (Only runs when RUNNING) ---
+    if GAME_STATE == 'RUNNING':
+        all_sprites.update()
+        score += 1 
+
+        # Hoverboard Timer Logic
+        if hoverboard_active:
+            hoverboard_timer -= 1
+            if hoverboard_timer <= 0:
+                hoverboard_active = False
+
+        # Collectibles Check
+        coins_collected = pygame.sprite.spritecollide(player, coins, True); 
+        for coin in coins_collected: score += 100 
+
+        diamonds_collected = pygame.sprite.spritecollide(player, diamonds_group, True); 
+        for diamond in diamonds_collected: diamonds += 1
+            
+        hoverboards_collected = pygame.sprite.spritecollide(player, hoverboards, True);
+        if hoverboards_collected:
+            hoverboard_active = True; hoverboard_timer = HOVERBOARD_DURATION; player.is_jumping = False 
+
+        # Collision Check (Obstacles)
+        if pygame.sprite.spritecollide(player, obstacles, False):
+            for obstacle in pygame.sprite.spritecollide(player, obstacles, False):
+                if not hoverboard_active:
+                    if player.rect.bottom > obstacle.rect.top + 5: 
+                        set_state('DEATH') # Change state on death
+
+    # --- Drawing/Rendering ---
+    if GAME_STATE == 'RUNNING' or GAME_STATE == 'PAUSED':
+        SCREEN.fill(WHITE)
+        ground_y = player.ground_y + 40
+        pygame.draw.line(SCREEN, BLACK, (LANE_X_POSITIONS[0] - LANE_WIDTH/2, ground_y), 
+                                        (LANE_X_POSITIONS[-1] + LANE_WIDTH/2, ground_y), 5)
+        
+        all_sprites.draw(SCREEN)
+
+        # Draw UI
+        pause_button.draw(SCREEN)
+        draw_text(f"SCORE: {score // 10}", FONT_MEDIUM, BLACK, SCREEN_WIDTH - 150, 30)
+        draw_text(f"Coins: {score // 10}", FONT_SMALL, YELLOW, 80, 30)
+        draw_text(f"Diamonds: {diamonds}", FONT_SMALL, PURPLE, 80, 60)
+        
+        if hoverboard_active:
+            draw_text(f"HOVERBOARD: {hoverboard_timer // 60 + 1}s", FONT_SMALL, CYAN, SCREEN_WIDTH - 150, 60)
+
+        # Draw pause overlay
+        if GAME_STATE == 'PAUSED':
+            draw_pause_menu()
+
+    # Draw specific screens (overlays the running game view if necessary)
+    elif GAME_STATE == 'HOME':
+        draw_home_screen()
+    elif GAME_STATE == 'DEATH':
+        draw_death_screen()
+    elif GAME_STATE == 'SHOP':
+        draw_shop_menu()
+    elif GAME_STATE == 'ABILITIES':
+        draw_abilities_menu()
+    elif GAME_STATE == 'INFO':
+        draw_info_box()
+
+    # Update the display
+    pygame.display.flip()
+    clock.tick(60)
+
+# Quit Pygame and Python
+pygame.quit()
+sys.exit()
